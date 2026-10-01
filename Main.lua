@@ -1,5 +1,5 @@
 -- ====================================================================
---   🐻 BEAR HUB v1.0 [OFFICIAL PROTECTED EDITION]
+--   🐻 BEAR HUB v1.0 [OFFICIAL INTEGRATED EDITION + AUTO LETTER v5.4]
 --   Author / Ownership: Bear Hub
 --   Tampering or removing watermarks will terminate script execution.
 -- ====================================================================
@@ -13,6 +13,7 @@ local Lighting = game:GetService("Lighting")
 local VirtualUser = game:GetService("VirtualUser")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 local RunService = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 
@@ -93,7 +94,17 @@ local CONFIG = {
     FarmEmergencyHealth = 65,
     FarmClickInterval = 0.12,
     FarmTargetTimeout = 30,
-    WeaponKeywords = { "katana", "sword", "blade", "tachi", "wakizashi", "nodachi", "saber" }
+    WeaponKeywords = { "katana", "sword", "blade", "tachi", "wakizashi", "nodachi", "saber" },
+
+    -- [ Auto Letter Settings v5.4 ]
+    LetterInitialOpenDelay = 1.0,
+    LetterBetweenClaimsDelay = 0.55,
+    LetterRulingUnlockDelay = 0.75,
+    LetterPollInterval = 0.30,
+    LetterReferKeywords = {
+        "tax", "taxes", "tax rate", "shogun", "samurai", 
+        "prisoner", "prison", "jail", "release", "punish"
+    }
 }
 
 -- Settings Config
@@ -163,7 +174,8 @@ getgenv().AdminState = {
     SpeedBoost = false,
     Noclip = false,
     InfJump = false,
-    AutoTPOnSelect = false
+    AutoTPOnSelect = false,
+    AutoLetter = false
 }
 
 getgenv().BearHubRunId = (getgenv().BearHubRunId or 0) + 1
@@ -1030,6 +1042,348 @@ task.spawn(function()
     end
 end)
 
+-- ================= 4.8 AUTO LETTER ENGINE (v5.4 FOCUS-HOLD) =================
+local LetterState = {
+    busy = false,
+    lastSig = "",
+    status = "พร้อมทำงาน",
+    solved = 0
+}
+
+local EMOJI_LIST = { "🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫", "⚪" }
+local function extractEmoji(str)
+    if not str then return nil end
+    for _, emo in ipairs(EMOJI_LIST) do
+        if str:find(emo, 1, true) then return emo end
+    end
+    return nil
+end
+
+local function cleanHtml(str)
+    if not str then return "" end
+    local cleaned = str:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$")
+    return cleaned or ""
+end
+
+local function executeLetterClick(btn, btnName)
+    if not btn or not btn.Parent then 
+        warn("[LetterClick] ไม่พบปุ่ม:", btnName)
+        return false 
+    end
+    
+    local pos = btn.AbsolutePosition + (btn.AbsoluteSize / 2)
+    local x = math.floor(pos.X)
+    local y = math.floor(pos.Y)
+
+    -- [หัวใจสำคัญ]: โฟกัสปุ่ม แล้วกด ButtonA ตามมาตรฐาน Roblox Engine
+    pcall(function()
+        GuiService.SelectedObject = btn
+        task.wait(0.08)
+
+        -- 1. ยิง ButtonA
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.ButtonA, false, game)
+        task.wait(0.08)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.ButtonA, false, game)
+        task.wait(0.05)
+
+        -- 2. ยิง Return (Enter)
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+        task.wait(0.04)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+    end)
+
+    -- [เสริม 1]: ยิง Event สัญญาณตรง
+    local eventNames = {"MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up"}
+    for _, sigName in ipairs(eventNames) do
+        pcall(function()
+            if btn[sigName] and type(firesignal) == "function" then
+                firesignal(btn[sigName])
+            end
+        end)
+        pcall(function()
+            if btn[sigName] and type(getconnections) == "function" then
+                for _, conn in ipairs(getconnections(btn[sigName])) do
+                    if type(conn.Fire) == "function" then
+                        conn:Fire()
+                    elseif type(conn.Function) == "function" then
+                        conn.Function()
+                    end
+                end
+            end
+        end)
+    end
+
+    -- [เสริม 2]: จำลองเมาส์คลิกพิกัดจริง
+    pcall(function()
+        VirtualInputManager:SendMouseMoveEvent(x, y, game)
+        task.wait(0.02)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+    end)
+
+    task.wait(0.08)
+    pcall(function()
+        GuiService.SelectedObject = nil
+    end)
+
+    return true
+end
+
+local function getLetterContainer()
+    local pg = plr:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    local mainUI = pg:FindFirstChild("MainUI") or pg
+    local claims = mainUI:FindFirstChild("Claims", true)
+    if claims and claims.Parent then
+        local p = claims.Parent
+        if p:FindFirstChild("Records") and p:FindFirstChild("Rulings") then
+            return p
+        end
+    end
+    return nil
+end
+
+local function parseTownRecords(recordsFrame)
+    local ctx = { signed = nil, wrote = 0, today = nil, streets = {}, heads = {}, houses = {} }
+    local currentStreet = nil
+
+    for _, rec in ipairs(recordsFrame:GetChildren()) do
+        if rec:IsA("GuiObject") and rec.Visible then
+            local entryLabel = rec:FindFirstChild("Entry")
+            local valueLabel = rec:FindFirstChild("Value")
+            if entryLabel and valueLabel then
+                local entry = cleanHtml(entryLabel.Text)
+                local val = cleanHtml(valueLabel.Text)
+                local el = entry:lower()
+                local vl = val:lower()
+
+                if el:find("signed on") then
+                    ctx.signed = tonumber(val:match("%d+"))
+                elseif el:find("wrote before") then
+                    if vl:find("none") or vl:find("never") then
+                        ctx.wrote = 0
+                    else
+                        ctx.wrote = tonumber(val:match("%d+")) or 0
+                    end
+                elseif el:find("today is") then
+                    ctx.today = tonumber(val:match("%d+"))
+                elseif el:find("^head:") then
+                    if currentStreet then
+                        ctx.heads[currentStreet] = entry:match("^[Hh]ead:%s*(.+)$")
+                        ctx.houses[currentStreet] = tonumber(val:match("(%d+)%s*[Hh]ouses?"))
+                    end
+                elseif vl:find("ryo") then
+                    currentStreet = el
+                    local dotEmoji = extractEmoji(val)
+                    local paidAmt = tonumber(val:match("(%d+)%s*Ryo"))
+                    ctx.streets[currentStreet] = { paid = paidAmt, dot = dotEmoji }
+                end
+            end
+        end
+    end
+    return ctx
+end
+
+local function verifyLetterClaim(claimText, ctx, bodyText, askText, sealEmoji, senderKey)
+    local c = cleanHtml(claimText):lower():gsub("%s+", " "):gsub("[%.!]+$", "")
+
+    -- 1. วันที่
+    local sd = c:match("signed on day (%d+)") or c:match("written on day (%d+)") or c:match("dated day (%d+)")
+    if sd then return (ctx.signed and ctx.signed == tonumber(sd)), "signed" end
+
+    -- 2. จำนวนวันที่ผ่านมา
+    local dn = c:match("(%d+) days? ago")
+    if dn then
+        if ctx.today and ctx.signed then
+            return ((ctx.today - ctx.signed) == tonumber(dn)), "days"
+        end
+    end
+
+    -- 3. การส่งจดหมาย
+    local isLetterCountClaim = c:find("written", 1, true) or c:find("wrote before", 1, true) or c:find("wrote in", 1, true)
+    if isLetterCountClaim then
+        if c:find("not written") or c:find("never") then return (ctx.wrote == 0), "wrote-none" end
+        local times = c:match("(%d+) times") or c:match("(%d+) letters")
+        if times then return (ctx.wrote ~= nil and ctx.wrote == tonumber(times)), "wrote-times" end
+    end
+
+    -- 4. หัวหน้าหมู่บ้าน
+    local headName, headStreet = c:match("^(.-) is the head of (.+)$")
+    if not headName then headStreet, headName = c:match("^the head of (.-) is (.+)$") end
+    if headName and headStreet then
+        local h = ctx.heads[headStreet:lower()]
+        return (h and h:lower() == headName:lower()), "head"
+    end
+
+    -- 5. จำนวนบ้าน
+    local hn = c:match("(%d+) houses")
+    if hn then
+        local target = senderKey
+        for s in pairs(ctx.streets) do if c:find(s, 1, true) then target = s break end end
+        return (target and ctx.houses[target] == tonumber(hn)), "houses"
+    end
+
+    -- 6. ตราประทับ
+    if c:find("seal", 1, true) then
+        local target = senderKey
+        for s in pairs(ctx.streets) do if c:find(s, 1, true) then target = s break end end
+        if target and ctx.streets[target] and ctx.streets[target].dot and sealEmoji then
+            return (ctx.streets[target].dot == sealEmoji), "seal"
+        end
+    end
+
+    -- 7. ภาษี
+    if not c:find("more than") and not c:find("less than") then
+        local pAmt = c:match("(%d+)%s*ryo in tax") or c:match("paid (%d+)%s*ryo") or c:match("paid (%d+)")
+        if pAmt then
+            local target = senderKey
+            for s in pairs(ctx.streets) do if c:find(s, 1, true) then target = s break end end
+            if target and ctx.streets[target] then
+                return (ctx.streets[target].paid == tonumber(pAmt)), "paid"
+            end
+        end
+    end
+
+    -- 8. ตัวเลขในเนื้อความ
+    local fullRef = (askText .. " " .. bodyText):lower():gsub("%s+", " ")
+    local foundAnyNumPattern = false
+    for num, item in c:gmatch("(%d+)%s+([%a]+)") do
+        foundAnyNumPattern = true
+        local singular = item:gsub("s$", "")
+        local p1 = "%f[%d]" .. num .. "%f[%D]%s+" .. singular
+        local p2 = "%f[%d]" .. num .. "%f[%D]%s+" .. item
+        if not fullRef:find(p1) and not fullRef:find(p2) then
+            return false, "body-num-mismatch"
+        end
+    end
+    if foundAnyNumPattern then return true, "body-num-match" end
+
+    for num in c:gmatch("%d+") do
+        if not fullRef:find("%f[%d]" .. num .. "%f[%D]") then
+            return false, "standalone-num-mismatch"
+        end
+    end
+
+    return true, "default-true"
+end
+
+local function processLetter(force)
+    local container = getLetterContainer()
+    if not container then 
+        LetterState.lastSig = ""
+        return 
+    end
+
+    local claimsFrame = container:FindFirstChild("Claims")
+    local recordsFrame = container:FindFirstChild("Records")
+    local rulingsFrame = container:FindFirstChild("Rulings")
+    if not (claimsFrame and recordsFrame and rulingsFrame) then return end
+
+    local fromText = cleanHtml(container:FindFirstChild("From") and container.From.Text or "")
+    local sender = fromText:match("^[Ff]rom%s+(.+)$") or fromText
+    local senderKey = sender:lower()
+
+    local askText = cleanHtml(container:FindFirstChild("Ask") and container.Ask.Text or "")
+    local bodyText = cleanHtml(container:FindFirstChild("Body") and container.Body.Text or "")
+
+    local sealFrame = container:FindFirstChild("Seal")
+    local sealGlyph = sealFrame and sealFrame:FindFirstChild("Glyph")
+    local sealEmoji = sealGlyph and extractEmoji(sealGlyph.Text) or ""
+
+    local currentSig = sender .. "|" .. askText .. "|" .. bodyText
+    if not force and currentSig == LetterState.lastSig then return end
+
+    LetterState.busy = true
+    LetterState.lastSig = currentSig
+
+    if not force then
+        LetterState.status = "รอกระดาษนิ่ง..."
+        task.wait(CONFIG.LetterInitialOpenDelay)
+    end
+
+    container = getLetterContainer()
+    if not container then LetterState.busy = false return end
+    claimsFrame = container:FindFirstChild("Claims")
+    recordsFrame = container:FindFirstChild("Records")
+    rulingsFrame = container:FindFirstChild("Rulings")
+    if not (claimsFrame and recordsFrame and rulingsFrame) then LetterState.busy = false return end
+
+    local ctx = parseTownRecords(recordsFrame)
+    local rows = {}
+    local anyFalse = false
+
+    for i = 1, 3 do
+        local claimBox = claimsFrame:FindFirstChild("Claim" .. i)
+        if claimBox then
+            local textLabel = claimBox:FindFirstChild("Text")
+            local trueBtn = claimBox:FindFirstChild("True")
+            local falseBtn = claimBox:FindFirstChild("False")
+
+            if textLabel and trueBtn and falseBtn then
+                local claimText = cleanHtml(textLabel.Text)
+                local verdict, kind = verifyLetterClaim(claimText, ctx, bodyText, askText, sealEmoji, senderKey)
+                if not verdict then anyFalse = true end
+
+                table.insert(rows, {
+                    index = i,
+                    verdict = verdict,
+                    targetName = verdict and "True" or "False"
+                })
+            end
+        end
+    end
+
+    local finalAnswer = "Grant"
+    if anyFalse then
+        finalAnswer = "Deny"
+    else
+        local fullText = (askText .. " " .. bodyText):lower()
+        for _, kw in ipairs(CONFIG.LetterReferKeywords) do
+            if fullText:find(kw, 1, true) then
+                finalAnswer = "Refer"
+                break
+            end
+        end
+    end
+
+    -- สั่งกด Claim 1 -> 2 -> 3
+    for i, r in ipairs(rows) do
+        local freshBox = claimsFrame:FindFirstChild("Claim" .. i)
+        local targetBtn = freshBox and freshBox:FindFirstChild(r.targetName)
+        if targetBtn then
+            LetterState.status = string.format("กดข้อ [%d]: %s", i, r.targetName:upper())
+            executeLetterClick(targetBtn, string.format("Claim%d_%s", i, r.targetName))
+            task.wait(CONFIG.LetterBetweenClaimsDelay)
+        end
+    end
+
+    -- ปลดล็อกปุ่มตัดสินด้านล่าง
+    LetterState.status = "ตัดสิน: " .. finalAnswer:upper()
+    task.wait(CONFIG.LetterRulingUnlockDelay)
+
+    local rulingBtn = rulingsFrame:FindFirstChild(finalAnswer)
+    if rulingBtn then
+        executeLetterClick(rulingBtn, "Ruling_" .. finalAnswer)
+        task.wait(0.2)
+        executeLetterClick(rulingBtn, "RulingConfirm_" .. finalAnswer)
+    end
+
+    LetterState.solved = LetterState.solved + 1
+    LetterState.status = "เสร็จสิ้น -> " .. finalAnswer:upper()
+    LetterState.busy = false
+end
+
+task.spawn(function()
+    while isCurrent() do
+        if getgenv().AdminState.AutoLetter and not LetterState.busy then
+            local ok, err = pcall(function() processLetter(false) end)
+            if not ok then LetterState.busy = false end
+        end
+        task.wait(CONFIG.LetterPollInterval)
+    end
+end)
+
 -- ================= 5. WORLD NAVIGATION SYSTEM =================
 local TeleportEngine = {
     Categories = {
@@ -1266,7 +1620,7 @@ local function buildMasterUI()
     local guiName = "BearHub_v1"
     local pg = plr:WaitForChild("PlayerGui")
 
-    for _, n in ipairs({ guiName, "ShogunMasterAdmin_v7_1", "ShogunMasterAdmin_v6_6", "BearHubModalGui", "ShogunModalGui" }) do
+    for _, n in ipairs({ guiName, "ShogunMasterAdmin_v7_1", "ShogunMasterAdmin_v6_6", "BearHubModalGui", "ShogunModalGui", "AutoLetterController_v5_4" }) do
         local old = pg:FindFirstChild(n)
         if old then old:Destroy() end
     end
@@ -1277,8 +1631,8 @@ local function buildMasterUI()
     gui.Parent = pg
 
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.fromOffset(510, 415)
-    frame.Position = UDim2.new(0.5, -255, 0.5, -207)
+    frame.Size = UDim2.fromOffset(510, 435)
+    frame.Position = UDim2.new(0.5, -255, 0.5, -217)
     frame.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
     frame.Active = true
     frame.Draggable = true
@@ -1305,15 +1659,19 @@ local function buildMasterUI()
     tc.CornerRadius = UDim.new(0, 8)
     tc.Parent = title
 
-    local leftPanel = Instance.new("Frame")
+    -- ปรับ LeftPanel เป็น ScrollingFrame ป้องกันปุ่มล้นหน้าต่าง
+    local leftPanel = Instance.new("ScrollingFrame")
     leftPanel.Size = UDim2.new(0, 190, 1, -42)
     leftPanel.Position = UDim2.new(0, 8, 0, 36)
     leftPanel.BackgroundTransparency = 1
+    leftPanel.ScrollBarThickness = 3
+    leftPanel.ScrollBarImageColor3 = Color3.fromRGB(70, 70, 95)
+    leftPanel.CanvasSize = UDim2.new(0, 0, 0, 445)
     leftPanel.Parent = frame
 
     local function makeToggle(name, labelText, yPos, stateKey, onToggle)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, 0, 0, 21)
+        btn.Size = UDim2.new(1, -6, 0, 21)
         btn.Position = UDim2.new(0, 0, 0, yPos)
         btn.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
         btn.Font = Enum.Font.GothamSemibold
@@ -1369,22 +1727,49 @@ local function buildMasterUI()
         MouseModule:Apply(v)
     end)
 
+    -- Toggle สำหรับ Auto Letter
+    local rLetter = makeToggle("TLet", "✉ Auto Letter (ตรวจจดหมาย)", 230, "AutoLetter", function(v)
+        if v then
+            LetterState.busy = false
+            LetterState.lastSig = ""
+        end
+    end)
+
+    -- ปุ่มกดทันที Solve Letter Now
+    local solveNowBtn = Instance.new("TextButton")
+    solveNowBtn.Size = UDim2.new(1, -6, 0, 20)
+    solveNowBtn.Position = UDim2.new(0, 0, 0, 253)
+    solveNowBtn.BackgroundColor3 = Color3.fromRGB(60, 45, 95)
+    solveNowBtn.Font = Enum.Font.GothamBold
+    solveNowBtn.Text = "⚡ Solve Letter Now (กดทันที)"
+    solveNowBtn.TextSize = 8
+    solveNowBtn.TextColor3 = Color3.fromRGB(255, 225, 100)
+    solveNowBtn.Parent = leftPanel
+    local snc = Instance.new("UICorner")
+    snc.CornerRadius = UDim.new(0, 4)
+    snc.Parent = solveNowBtn
+
+    solveNowBtn.Activated:Connect(function()
+        LetterState.busy = false
+        task.spawn(function() processLetter(true) end)
+    end)
+
     local infoLabel = Instance.new("TextLabel")
-    infoLabel.Size = UDim2.new(1, 0, 0, 40)
-    infoLabel.Position = UDim2.new(0, 0, 0, 235)
+    infoLabel.Size = UDim2.new(1, -6, 0, 46)
+    infoLabel.Position = UDim2.new(0, 0, 0, 276)
     infoLabel.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
     infoLabel.Font = Enum.Font.Gotham
     infoLabel.TextSize = 8
     infoLabel.TextColor3 = Color3.fromRGB(180, 180, 200)
-    infoLabel.Text = "HP: 100% | Hunger: 100%\nSick: None | Status: Ready"
+    infoLabel.Text = "HP: 100% | Hunger: 100%\nSick: None | Status: Ready\nLetter: พร้อมทำงาน"
     infoLabel.Parent = leftPanel
     local ic = Instance.new("UICorner")
     ic.CornerRadius = UDim.new(0, 4)
     ic.Parent = infoLabel
 
     local claimBtn = Instance.new("TextButton")
-    claimBtn.Size = UDim2.new(1, 0, 0, 20)
-    claimBtn.Position = UDim2.new(0, 0, 0, 279)
+    claimBtn.Size = UDim2.new(1, -6, 0, 20)
+    claimBtn.Position = UDim2.new(0, 0, 0, 325)
     claimBtn.BackgroundColor3 = Color3.fromRGB(45, 95, 140)
     claimBtn.Font = Enum.Font.GothamBold
     claimBtn.Text = "Claim Paycheck & Allowance"
@@ -1401,8 +1786,8 @@ local function buildMasterUI()
     end)
 
     local sickBtn = Instance.new("TextButton")
-    sickBtn.Size = UDim2.new(0.48, -2, 0, 22)
-    sickBtn.Position = UDim2.new(0, 0, 0, 302)
+    sickBtn.Size = UDim2.new(0.48, -4, 0, 22)
+    sickBtn.Position = UDim2.new(0, 0, 0, 348)
     sickBtn.BackgroundColor3 = Color3.fromRGB(130, 40, 140)
     sickBtn.Font = Enum.Font.GothamBold
     sickBtn.Text = "Buy Senjigusuri"
@@ -1420,8 +1805,8 @@ local function buildMasterUI()
     end)
 
     local healBtn = Instance.new("TextButton")
-    healBtn.Size = UDim2.new(0.48, -2, 0, 22)
-    healBtn.Position = UDim2.new(0.52, 2, 0, 302)
+    healBtn.Size = UDim2.new(0.48, -4, 0, 22)
+    healBtn.Position = UDim2.new(0.52, 0, 0, 348)
     healBtn.BackgroundColor3 = Color3.fromRGB(35, 130, 80)
     healBtn.Font = Enum.Font.GothamBold
     healBtn.Text = "Buy Kaifukuto"
@@ -1439,8 +1824,8 @@ local function buildMasterUI()
     end)
 
     local foodBtn = Instance.new("TextButton")
-    foodBtn.Size = UDim2.new(1, 0, 0, 20)
-    foodBtn.Position = UDim2.new(0, 0, 0, 327)
+    foodBtn.Size = UDim2.new(1, -6, 0, 20)
+    foodBtn.Position = UDim2.new(0, 0, 0, 373)
     foodBtn.BackgroundColor3 = Color3.fromRGB(160, 90, 40)
     foodBtn.Font = Enum.Font.GothamBold
     foodBtn.Text = "Buy Bread (Genzo)"
@@ -1458,8 +1843,8 @@ local function buildMasterUI()
     end)
 
     local settingsBtn = Instance.new("TextButton")
-    settingsBtn.Size = UDim2.new(1, 0, 0, 20)
-    settingsBtn.Position = UDim2.new(0, 0, 0, 351)
+    settingsBtn.Size = UDim2.new(1, -6, 0, 20)
+    settingsBtn.Position = UDim2.new(0, 0, 0, 396)
     settingsBtn.BackgroundColor3 = Color3.fromRGB(70, 70, 100)
     settingsBtn.Font = Enum.Font.GothamBold
     settingsBtn.Text = "⚙ Settings (ปรับค่า)"
@@ -1471,7 +1856,7 @@ local function buildMasterUI()
     stc.Parent = settingsBtn
 
     local sFrame = Instance.new("Frame")
-    sFrame.Size = UDim2.fromOffset(240, 415)
+    sFrame.Size = UDim2.fromOffset(240, 435)
     sFrame.Position = UDim2.new(1, 6, 0, 0)
     sFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
     sFrame.Visible = false
@@ -1635,7 +2020,7 @@ local function buildMasterUI()
     catLayout.Parent = catBar
 
     local listScroll = Instance.new("ScrollingFrame")
-    listScroll.Size = UDim2.new(1, -12, 0, 218)
+    listScroll.Size = UDim2.new(1, -12, 0, 238)
     listScroll.Position = UDim2.new(0, 6, 0, 34)
     listScroll.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
     listScroll.ScrollBarThickness = 4
@@ -1705,7 +2090,7 @@ local function buildMasterUI()
 
     local tpBtn = Instance.new("TextButton")
     tpBtn.Size = UDim2.new(0.48, -4, 0, 26)
-    tpBtn.Position = UDim2.new(0, 6, 0, 260)
+    tpBtn.Position = UDim2.new(0, 6, 0, 280)
     tpBtn.BackgroundColor3 = Color3.fromRGB(45, 120, 75)
     tpBtn.Font = Enum.Font.GothamBold
     tpBtn.Text = "Teleport Now"
@@ -1724,7 +2109,7 @@ local function buildMasterUI()
 
     local scanBtn = Instance.new("TextButton")
     scanBtn.Size = UDim2.new(0.48, -4, 0, 26)
-    scanBtn.Position = UDim2.new(0.52, 2, 0, 260)
+    scanBtn.Position = UDim2.new(0.52, 2, 0, 280)
     scanBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 75)
     scanBtn.Font = Enum.Font.GothamBold
     scanBtn.Text = "Scan World"
@@ -1746,22 +2131,22 @@ local function buildMasterUI()
     -- Watermark Integrity Guard Loop
     task.spawn(function()
         while gui.Parent and isCurrent() do
-            -- ตรวจสอบว่ามีใครพยายามเปลี่ยนชื่อ Title หรือไม่
             if not title or not title.Parent or not title.Text:find("BEAR HUB") then
                 if getgenv().BearHubShutdown then getgenv().BearHubShutdown() end
                 break
             end
 
-            rFish(); rParry(); rSurv(); rEsp(); rFarm(); rMouse(); rBri(); rSpd(); rNoc(); rJmp()
+            rFish(); rParry(); rSurv(); rEsp(); rFarm(); rMouse(); rBri(); rSpd(); rNoc(); rJmp(); rLetter()
 
             infoLabel.Text = string.format(
-                "HP: %d/%d | Hunger: %d%%\nSick: %s (Lv.%d)\nFish: %d cast / %d bite / %d miss",
+                "HP: %d/%d | Hunger: %d%%\nSick: %s (Lv.%d) | Fish: %d/%d\nLetter: %s (%d solved)",
                 math.floor(SurvivalEngine.Health),
                 math.floor(SurvivalEngine.MaxHealth),
                 SurvivalEngine.Hunger,
                 tostring(SurvivalEngine.Sickness),
                 SurvivalEngine.Stage,
-                FishStats.casts, FishStats.caught, FishStats.misses
+                FishStats.caught, FishStats.casts,
+                LetterState.status, LetterState.solved
             )
             task.wait(0.6)
         end
@@ -1788,6 +2173,8 @@ getgenv().BearHubShutdown = function()
     pcall(function() getgenv().AdminState.AutoFish = false end)
     pcall(function() getgenv().AdminState.AutoFarm = false end)
     pcall(function() getgenv().AdminState.AutoParry = false end)
+    pcall(function() getgenv().AdminState.AutoLetter = false end)
+    pcall(function() GuiService.SelectedObject = nil end)
     pcall(restoreNoclip)
     pcall(function() BanditESP:Clear() end)
     pcall(function() FarmFace.Root = nil; RunService:UnbindFromRenderStep("BearHubFarmFace") end)
