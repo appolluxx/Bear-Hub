@@ -1,5 +1,5 @@
 -- ====================================================================
---   🐻 BEAR HUB v1.0 [OFFICIAL INTEGRATED EDITION + AUTO LETTER v5.4]
+--   🐻 BEAR HUB v1.0 [OFFICIAL INTEGRATED EDITION - NEAREST CHAIN]
 --   Author / Ownership: Bear Hub
 --   Tampering or removing watermarks will terminate script execution.
 -- ====================================================================
@@ -84,7 +84,7 @@ local CONFIG = {
     ParryRepressGap = 0.3,
     ParryAnyAction = true,
 
-    -- [ Auto Farm Bandits ]
+    -- [ Auto Farm Bandits Settings & Safety ]
     FarmDistance = 4,
     FarmYOffset = 0,
     FarmMode = 2,
@@ -93,7 +93,8 @@ local CONFIG = {
     FarmLeash = 12,
     FarmEmergencyHealth = 65,
     FarmClickInterval = 0.12,
-    FarmTargetTimeout = 30,
+    FarmTargetTimeout = 25,
+    FarmMinY = 120, -- พิกัดความสูงขั้นต่ำ (ถ้าต่ำกว่านี้ถือว่าอยู่ใต้ดิน/ตกแมพ ห้ามวาปไป)
     WeaponKeywords = { "katana", "sword", "blade", "tachi", "wakizashi", "nodachi", "saber" },
 
     -- [ Auto Letter Settings v5.4 ]
@@ -109,6 +110,7 @@ local CONFIG = {
 
 -- Settings Config
 local SETTINGS = {
+    { key = "FarmMinY",                 label = "Min Bandit Y (ห้ามต่ำกว่า)", min = -50, max = 300, step = 5, dec = 0 },
     { key = "FarmDistance",             label = "Farm Distance",      min = 1.5,  max = 15,  step = 0.5,  dec = 1 },
     { key = "FarmMode",                 label = "Mode (1=หลัง,2=บนหัว)", min = 1, max = 2,  step = 1,    dec = 0 },
     { key = "FarmAboveHeight",          label = "Above Height",       min = 2,    max = 20,  step = 0.5,  dec = 1 },
@@ -129,7 +131,7 @@ local SETTINGS = {
 }
 
 local SETTINGS_FILE = "BearHubSettings.json"
-local SETTINGS_VERSION = 2
+local SETTINGS_VERSION = 3
 local DEFAULTS = {}
 for _, def in ipairs(SETTINGS) do DEFAULTS[def.key] = CONFIG[def.key] end
 
@@ -865,7 +867,7 @@ task.spawn(function()
     end
 end)
 
--- ================= 4.5 AUTO FARM BANDITS =================
+-- ================= 4.5 AUTO FARM BANDITS (NEAREST-FIRST CHAIN & PURE TP) =================
 local function findWeapon()
     local backpack = plr:FindFirstChild("Backpack")
     local char = plr.Character
@@ -939,6 +941,7 @@ RunService:BindToRenderStep("BearHubFarmFace", 3001, function()
     end
 end)
 
+-- ค้นหาตัวที่ใกล้ที่สุดก่อนเสมอ (Nearest-First Selection)
 local function getNearestBandit(fromPos)
     local world = workspace:FindFirstChild("World")
     local bandits = world and world:FindFirstChild("Bandits")
@@ -948,9 +951,16 @@ local function getNearestBandit(fromPos)
     for _, mob in ipairs(bandits:GetChildren()) do
         local hum = mob:FindFirstChildOfClass("Humanoid")
         local mRoot = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChildWhichIsA("BasePart", true)
-        if hum and mRoot and hum.Health > 0 then
-            local d = (mRoot.Position - fromPos).Magnitude
-            if d < bestDist then best, bestDist = mob, d end
+        
+        -- ต้องมีชีวิต ไม่ติดแอนิเมชันตาย และต้องไม่อยู่ต่ำกว่าระดับ FarmMinY
+        if hum and mRoot and hum.Health > 0 and hum:GetState() ~= Enum.HumanoidStateType.Dead then
+            if mRoot.Position.Y >= CONFIG.FarmMinY then
+                local d = (mRoot.Position - fromPos).Magnitude
+                if d < bestDist then 
+                    best = mob
+                    bestDist = d 
+                end
+            end
         end
     end
     return best
@@ -975,20 +985,28 @@ task.spawn(function()
                 break
             end
 
+            -- ค้นหาตัวที่อยู่ใกล้ที่สุดจากตำแหน่งปัจจุบัน
             local target = getNearestBandit(root.Position)
             if not target then
-                task.wait(1)
+                task.wait(0.8)
                 break
             end
 
-            local t0, lastSwing, arrived = os.clock(), 0, false
+            local t0, lastSwing = os.clock(), 0
             local fixedDir = nil
+
             while isCurrent() and getgenv().AdminState.AutoFarm and not SurvivalEngine.IsBusy
                 and os.clock() - t0 < CONFIG.FarmTargetTimeout do
 
                 local tHum = target:FindFirstChildOfClass("Humanoid")
                 local tRoot = target:FindFirstChild("HumanoidRootPart") or target:FindFirstChildWhichIsA("BasePart", true)
-                if not target.Parent or not tHum or not tRoot or tHum.Health <= 0 then break end
+                
+                -- หากม็อบตาย, หลุดแมพ, ร่วงใต้ดิน หรือกำลังสลายตัว ให้ตัดเป้าหมายไปหาตัวใหม่ทันที
+                if not target.Parent or not tHum or not tRoot or tHum.Health <= 0 
+                    or tHum:GetState() == Enum.HumanoidStateType.Dead 
+                    or tRoot.Position.Y < CONFIG.FarmMinY then 
+                    break 
+                end
 
                 local _, myHum, myRoot = getAliveCharacter()
                 if not myRoot or not myHum then break end
@@ -997,14 +1015,16 @@ task.spawn(function()
                 local tPos = tRoot.Position
                 FarmFace.Root = tRoot
 
+                -- ระบบวาปติดตัว 100% (Pure Teleport Snap - ไม่มีการเดิน)
                 if CONFIG.FarmMode == 2 then
+                    -- Mode 2: วาปอยู่บนหัว
                     FarmFace.Down = true
                     local hoverPos = tPos + Vector3.new(0, CONFIG.FarmAboveHeight, 0)
                     myRoot.AssemblyLinearVelocity = Vector3.zero
                     myRoot.AssemblyAngularVelocity = Vector3.zero
                     myRoot.CFrame = CFrame.lookAt(hoverPos, hoverPos + Vector3.new(0, -1, 0), Vector3.new(0, 0, 1))
-                    arrived = true
                 else
+                    -- Mode 1: วาปอยู่ข้างหลัง/ข้างหน้า
                     FarmFace.Down = false
                     if not fixedDir then
                         local back = tRoot.CFrame.LookVector * CONFIG.FarmSide
@@ -1013,16 +1033,9 @@ task.spawn(function()
                         fixedDir = flat.Unit
                     end
                     local desired = tPos + fixedDir * CONFIG.FarmDistance + Vector3.new(0, CONFIG.FarmYOffset, 0)
-
-                    local gap = Vector3.new(desired.X - myRoot.Position.X, 0, desired.Z - myRoot.Position.Z).Magnitude
-                    if not arrived or gap > CONFIG.FarmLeash then
-                        arrived = true
-                        myRoot.AssemblyLinearVelocity = Vector3.zero
-                        myRoot.CFrame = CFrame.lookAt(desired, Vector3.new(tPos.X, desired.Y, tPos.Z))
-                    elseif gap > 1.5 then
-                        myHum:MoveTo(desired)
-                    end
-                    myRoot.CFrame = CFrame.lookAt(myRoot.Position, Vector3.new(tPos.X, myRoot.Position.Y, tPos.Z))
+                    myRoot.AssemblyLinearVelocity = Vector3.zero
+                    myRoot.AssemblyAngularVelocity = Vector3.zero
+                    myRoot.CFrame = CFrame.lookAt(desired, Vector3.new(tPos.X, desired.Y, tPos.Z))
                 end
 
                 if not ParrySystem.Parrying and os.clock() - lastSwing >= CONFIG.FarmClickInterval then
@@ -1031,13 +1044,14 @@ task.spawn(function()
                 end
                 RunService.Heartbeat:Wait()
             end
+
             FarmFace.Root = nil
             FarmFace.Down = false
             do
                 local _, rh = getAliveCharacter()
                 if rh then rh.AutoRotate = true end
             end
-            task.wait(0.1)
+            task.wait(0.04) -- เว้นจังหวะสั้นๆ แล้วสแกนหาตัวที่ใกล้ที่สุดตัวถัดไปทันที
         until true
     end
 end)
@@ -1284,8 +1298,11 @@ local function processLetter(force)
     local sender = fromText:match("^[Ff]rom%s+(.+)$") or fromText
     local senderKey = sender:lower()
 
-    local askText = cleanHtml(container:FindFirstChild("Ask") and container.Ask.Text or "")
-    local bodyText = cleanHtml(container:FindFirstChild("Body") and container.Body.Text or "")
+    local rawAsk = container:FindFirstChild("Ask") and container.Ask.Text or ""
+    local askText = cleanHtml(rawAsk)
+
+    local rawBody = container:FindFirstChild("Body") and container.Body.Text or ""
+    local bodyText = cleanHtml(rawBody)
 
     local sealFrame = container:FindFirstChild("Seal")
     local sealGlyph = sealFrame and sealFrame:FindFirstChild("Glyph")
@@ -1659,7 +1676,6 @@ local function buildMasterUI()
     tc.CornerRadius = UDim.new(0, 8)
     tc.Parent = title
 
-    -- ปรับ LeftPanel เป็น ScrollingFrame ป้องกันปุ่มล้นหน้าต่าง
     local leftPanel = Instance.new("ScrollingFrame")
     leftPanel.Size = UDim2.new(0, 190, 1, -42)
     leftPanel.Position = UDim2.new(0, 8, 0, 36)
@@ -1727,7 +1743,6 @@ local function buildMasterUI()
         MouseModule:Apply(v)
     end)
 
-    -- Toggle สำหรับ Auto Letter
     local rLetter = makeToggle("TLet", "✉ Auto Letter (ตรวจจดหมาย)", 230, "AutoLetter", function(v)
         if v then
             LetterState.busy = false
@@ -1735,7 +1750,6 @@ local function buildMasterUI()
         end
     end)
 
-    -- ปุ่มกดทันที Solve Letter Now
     local solveNowBtn = Instance.new("TextButton")
     solveNowBtn.Size = UDim2.new(1, -6, 0, 20)
     solveNowBtn.Position = UDim2.new(0, 0, 0, 253)
@@ -1909,7 +1923,7 @@ local function buildMasterUI()
         lbl.BackgroundTransparency = 1
         lbl.Font = Enum.Font.Gotham
         lbl.Text = def.label
-        lbl.TextSize = 9
+        lbl.TextSize = 8
         lbl.TextColor3 = Color3.fromRGB(220, 220, 235)
         lbl.TextXAlignment = Enum.TextXAlignment.Left
         lbl.Parent = row
